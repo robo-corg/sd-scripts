@@ -81,11 +81,12 @@ from diffusers import (
     UNet2DConditionModel,
     StableDiffusionPipeline,
 )
+from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from einops import rearrange
 from torch import einsum
 from tqdm import tqdm
 from torchvision import transforms
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPModel, CLIPTextConfig
+from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer, CLIPModel, CLIPTextConfig
 import PIL
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
@@ -549,8 +550,8 @@ class PipelineLike:
         vgg16_model: torchvision.models.VGG,
         vgg16_guidance_scale: float,
         vgg16_layer_no: int,
-        # safety_checker: StableDiffusionSafetyChecker,
-        # feature_extractor: CLIPFeatureExtractor,
+        safety_checker: StableDiffusionSafetyChecker,
+        feature_extractor: CLIPFeatureExtractor,
     ):
         super().__init__()
         self.device = device
@@ -588,7 +589,8 @@ class PipelineLike:
         self.tokenizer = tokenizer
         self.unet = unet
         self.scheduler = scheduler
-        self.safety_checker = None
+        self.safety_checker = safety_checker
+        self.feature_extractor = feature_extractor
 
         # Textual Inversion
         self.token_replacements = {}
@@ -705,6 +707,15 @@ class PipelineLike:
         #     cpu_offload(cpu_offloaded_model, device)
 
     # endregion
+
+    @staticmethod
+    def numpy_to_pil(image):
+        """
+        Convert a numpy image or a batch of images to a PIL image.
+        """
+        image = (image * 255).round().astype("uint8")
+        image = [Image.fromarray(im) for im in image]
+        return image
 
     @torch.no_grad()
     def __call__(
@@ -1218,10 +1229,13 @@ class PipelineLike:
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if self.safety_checker is not None:
-            safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
+            safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt")
+            clip_input = safety_checker_input.pixel_values.to(text_embeddings.dtype)
+
+            # safety_checker seems to assume numpy/cpu?
             image, has_nsfw_concept = self.safety_checker(
                 images=image,
-                clip_input=safety_checker_input.pixel_values.to(text_embeddings.dtype),
+                clip_input=clip_input.cpu(),
             )
         else:
             has_nsfw_concept = None
@@ -2224,13 +2238,17 @@ def main(args):
     if use_stable_diffusion_format:
         print("load StableDiffusion checkpoint")
         text_encoder, vae, unet = model_util.load_models_from_stable_diffusion_checkpoint(args.v2, args.ckpt)
+        safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker")
+        feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-large-patch14")
     else:
         print("load Diffusers pretrained models")
-        loading_pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, safety_checker=None, torch_dtype=dtype)
+        loading_pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, torch_dtype=dtype)
         text_encoder = loading_pipe.text_encoder
         vae = loading_pipe.vae
         unet = loading_pipe.unet
         tokenizer = loading_pipe.tokenizer
+        safety_checker = loading_pipe.safety_checker
+        feature_extractor = loading_pipe.feature_extractor
         del loading_pipe
 
     # VAEを読み込む
@@ -2520,6 +2538,8 @@ def main(args):
         vgg16_model,
         args.vgg16_guidance_scale,
         args.vgg16_guidance_layer,
+        safety_checker,
+        feature_extractor
     )
     pipe.set_control_nets(control_nets)
     print("pipeline is ready.")
