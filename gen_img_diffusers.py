@@ -1228,14 +1228,16 @@ class PipelineLike:
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
+
         if self.safety_checker is not None:
             safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt")
-            clip_input = safety_checker_input.pixel_values.to(text_embeddings.dtype)
+
+            clip_input = safety_checker_input.pixel_values.to(text_embeddings.dtype).to(self.device)
 
             # safety_checker seems to assume numpy/cpu?
             image, has_nsfw_concept = self.safety_checker(
                 images=image,
-                clip_input=clip_input.cpu(),
+                clip_input=clip_input,
             )
         else:
             has_nsfw_concept = None
@@ -2238,8 +2240,8 @@ def main(args):
     if use_stable_diffusion_format:
         print("load StableDiffusion checkpoint")
         text_encoder, vae, unet = model_util.load_models_from_stable_diffusion_checkpoint(args.v2, args.ckpt)
-        safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker")
-        feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-large-patch14")
+        safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker", torch_dtype=dtype)
+        feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=dtype)
     else:
         print("load Diffusers pretrained models")
         loading_pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, torch_dtype=dtype)
@@ -2406,6 +2408,7 @@ def main(args):
         del sli_vae
     vae.to(dtype).to(device)
 
+    safety_checker.to(dtype).to(device)
     text_encoder.to(dtype).to(device)
     unet.to(dtype).to(device)
     if clip_model is not None:
